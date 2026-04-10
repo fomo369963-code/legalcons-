@@ -1,8 +1,7 @@
-from dotenv import load_dotenv
-load_dotenv()
 import os
 import asyncio
 import time
+import sys
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,18 +16,15 @@ from telegram.constants import ChatAction, ParseMode
 import anthropic
 
 # ─── Конфигурация ────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_ЗДЕСЬ")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "ВАШ_ANTHROPIC_KEY_ЗДЕСЬ")
+TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 # ─── Настройки защиты от абуза ───────────────────────────────────────────────
-RATE_LIMIT_MESSAGES = 10        # макс сообщений за окно
-RATE_LIMIT_WINDOW   = 60        # окно в секундах
-RATE_LIMIT_COOLDOWN = 300       # бан на 5 минут после превышения
-MAX_MESSAGE_LENGTH  = 1000      # макс символов в одном сообщении
-MAX_HISTORY         = 20        # макс сообщений в контексте диалога
-
-# Whitelist: если не пустой — бот отвечает ТОЛЬКО этим user_id
-# Например: WHITELIST = {123456789, 987654321}
+RATE_LIMIT_MESSAGES = 10
+RATE_LIMIT_WINDOW   = 60
+RATE_LIMIT_COOLDOWN = 300
+MAX_MESSAGE_LENGTH  = 1000
+MAX_HISTORY         = 20
 WHITELIST: set[int] = set()
 
 # ─── Хранилища ───────────────────────────────────────────────────────────────
@@ -138,8 +134,6 @@ SYSTEM_PROMPT = """Ты — Юридический Советник ИИ, све
 # ─── Rate limiting ────────────────────────────────────────────────────────────
 def check_rate_limit(user_id: int) -> tuple[bool, str]:
     now = time.time()
-
-    # Проверка блокировки
     if user_id in blocked_users:
         unblock_at = blocked_users[user_id]
         if now < unblock_at:
@@ -148,12 +142,8 @@ def check_rate_limit(user_id: int) -> tuple[bool, str]:
             return False, f"🚫 Превышен лимит. Попробуйте через {m} мин {s} сек."
         else:
             del blocked_users[user_id]
-
-    # Чистим старые метки
     window_start = now - RATE_LIMIT_WINDOW
     rate_limit_data[user_id] = [t for t in rate_limit_data[user_id] if t > window_start]
-
-    # Проверяем лимит
     if len(rate_limit_data[user_id]) >= RATE_LIMIT_MESSAGES:
         blocked_users[user_id] = now + RATE_LIMIT_COOLDOWN
         m = RATE_LIMIT_COOLDOWN // 60
@@ -162,7 +152,6 @@ def check_rate_limit(user_id: int) -> tuple[bool, str]:
             f"Вы заблокированы на {m} минут.\n\n"
             f"Лимит: {RATE_LIMIT_MESSAGES} сообщений за {RATE_LIMIT_WINDOW} секунд."
         )
-
     rate_limit_data[user_id].append(now)
     return True, ""
 
@@ -178,16 +167,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     keyboard = [
         [
-            InlineKeyboardButton("⚖️ Трудовые споры",    callback_data="topic_labor"),
-            InlineKeyboardButton("🏠 Жилищные вопросы",  callback_data="topic_housing"),
+            InlineKeyboardButton("⚖️ Трудовые споры",     callback_data="topic_labor"),
+            InlineKeyboardButton("🏠 Жилищные вопросы",   callback_data="topic_housing"),
         ],
         [
-            InlineKeyboardButton("👨‍👩‍👧 Семейное право",   callback_data="topic_family"),
-            InlineKeyboardButton("💼 Гражданские дела",  callback_data="topic_civil"),
+            InlineKeyboardButton("👨‍👩‍👧 Семейное право",    callback_data="topic_family"),
+            InlineKeyboardButton("💼 Гражданские дела",   callback_data="topic_civil"),
         ],
         [
             InlineKeyboardButton("🚔 Административка/УК", callback_data="topic_criminal"),
-            InlineKeyboardButton("🏦 Налоги",             callback_data="topic_tax"),
+            InlineKeyboardButton("🏦 Налоги",              callback_data="topic_tax"),
         ],
         [InlineKeyboardButton("❓ Как пользоваться", callback_data="help")],
     ]
@@ -237,16 +226,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     now = time.time()
     recent = [t for t in rate_limit_data.get(user_id, []) if t > now - RATE_LIMIT_WINDOW]
     is_blocked = user_id in blocked_users and blocked_users[user_id] > now
-
-    remaining_msg = ""
-    if is_blocked:
-        left = int(blocked_users[user_id] - now)
-        remaining_msg = f"\nРазблокировка через: {left // 60} мин {left % 60} сек"
-
+    status = "🚫 заблокирован" if is_blocked else "✅ активен"
     await update.message.reply_text(
         f"📊 *Статистика:*\n\n"
         f"Запросов за {RATE_LIMIT_WINDOW}с: {len(recent)}/{RATE_LIMIT_MESSAGES}\n"
-        f"Статус: {'🚫 заблокирован' + remaining_msg if is_blocked else '✅ активен'}\n"
+        f"Статус: {status}\n"
         f"Сообщений в истории: {len(user_histories.get(user_id, []))}",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -270,12 +254,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     topic_prompts = {
-        "topic_labor":   "Расскажи кратко о 5 самых частых проблемах по Трудовому кодексу РФ, которые ты помогаешь решать.",
-        "topic_housing": "Расскажи кратко о 5 самых частых жилищных вопросах по ЖК РФ, которые ты помогаешь решать.",
-        "topic_family":  "Расскажи кратко о 5 самых частых вопросах семейного права по СК РФ, которые ты помогаешь решать.",
-        "topic_civil":   "Расскажи кратко о 5 самых частых гражданских делах по ГК РФ, которые ты помогаешь решать.",
-        "topic_criminal":"Расскажи кратко о 5 самых частых вопросах по КоАП РФ и УК РФ, которые ты помогаешь решать.",
-        "topic_tax":     "Расскажи кратко о 5 самых частых налоговых вопросах по НК РФ, которые ты помогаешь решать.",
+        "topic_labor":    "Расскажи кратко о 5 самых частых проблемах по Трудовому кодексу РФ, которые ты помогаешь решать.",
+        "topic_housing":  "Расскажи кратко о 5 самых частых жилищных вопросах по ЖК РФ, которые ты помогаешь решать.",
+        "topic_family":   "Расскажи кратко о 5 самых частых вопросах семейного права по СК РФ, которые ты помогаешь решать.",
+        "topic_civil":    "Расскажи кратко о 5 самых частых гражданских делах по ГК РФ, которые ты помогаешь решать.",
+        "topic_criminal": "Расскажи кратко о 5 самых частых вопросах по КоАП РФ и УК РФ, которые ты помогаешь решать.",
+        "topic_tax":      "Расскажи кратко о 5 самых частых налоговых вопросах по НК РФ, которые ты помогаешь решать.",
     }
 
     prompt = topic_prompts.get(query.data)
@@ -297,12 +281,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     user_message = update.message.text
 
-    # Whitelist
     if WHITELIST and user_id not in WHITELIST:
         await update.message.reply_text("⛔ Доступ ограничен.")
         return
 
-    # Длина сообщения
     if len(user_message) > MAX_MESSAGE_LENGTH:
         await update.message.reply_text(
             f"✂️ Сообщение слишком длинное ({len(user_message)} симв.).\n"
@@ -310,7 +292,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Rate limit
     allowed, error_msg = check_rate_limit(user_id)
     if not allowed:
         await update.message.reply_text(error_msg)
@@ -390,7 +371,6 @@ def main() -> None:
     print(f"   Rate limit : {RATE_LIMIT_MESSAGES} сообщений / {RATE_LIMIT_WINDOW}с")
     print(f"   Cooldown   : {RATE_LIMIT_COOLDOWN}с после превышения")
     print(f"   Макс. длина: {MAX_MESSAGE_LENGTH} символов")
-    print(f"   Whitelist  : {'включён' if WHITELIST else 'выключен (открыт для всех)'}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
